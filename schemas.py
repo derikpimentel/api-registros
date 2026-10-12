@@ -61,3 +61,42 @@ class RegistroResposta(BaseModel):
     data_hora_online: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+
+class ChaveAPICriar(BaseModel):
+    nome_sistema: str = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+    @field_validator("nome_sistema")
+    @classmethod
+    def validar_nome_sistema(cls, valor: str) -> str:
+        valor = valor.strip()
+
+        if not valor:
+            raise ValueError("O nome do sistema não pode estar vazio.")
+
+        if any(ord(caractere) < 32 for caractere in valor):
+            raise ValueError("O nome contém caracteres de controle.")
+
+        return valor
+
+
+class ChaveAPIResposta(BaseModel):
+    id: int
+    nome_sistema: str
+    ativa: bool
+    criada_em: datetime
+    ultimo_uso_em: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChaveAPICriada(BaseModel):
+    id: int
+    nome_sistema: str
+    chave_api: str
+    ativa: bool
+    criada_em: datetime
