@@ -93,3 +93,10 @@ class ChaveAPI(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+    pode_consultar_todos: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )

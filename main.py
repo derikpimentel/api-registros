@@ -1,9 +1,10 @@
 
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from sqlalchemy import select
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -14,8 +15,10 @@ from schemas import (
     ChaveAPICriar,
     ChaveAPICriada,
     ChaveAPIResposta,
+    PermissaoConsultaGlobal,
     RegistroEntrada,
     RegistroResposta,
+    RegistroPaginadoResposta,
 )
 from security import calcular_hash_chave, gerar_chave_api
 
@@ -114,6 +117,7 @@ def criar_chave_cliente(
             "nome_sistema": registro_chave.nome_sistema,
             "chave_api": chave,
             "ativa": registro_chave.ativa,
+            "pode_consultar_todos": registro_chave.pode_consultar_todos,
             "criada_em": registro_chave.criada_em,
         }
 
@@ -176,6 +180,40 @@ def revogar_chave_cliente(
         )
 
 
+@app.patch(
+    "/admin/chaves/{chave_id}/permissao-consulta-global",
+    response_model=ChaveAPIResposta,
+    dependencies=[Depends(verificar_admin_api_key)],
+)
+def alterar_permissao_consulta_global(
+    chave_id: int,
+    entrada: PermissaoConsultaGlobal,
+    db: Session = Depends(get_db),
+):
+    try:
+        chave = db.get(ChaveAPI, chave_id)
+
+        if chave is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Chave não encontrada.",
+            )
+
+        chave.pode_consultar_todos = entrada.pode_consultar_todos
+
+        db.commit()
+        db.refresh(chave)
+
+        return chave
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível alterar a permissão.",
+        )
+
+
 @app.post(
     "/registros",
     response_model=RegistroResposta,
@@ -209,4 +247,194 @@ def criar_registro(
         raise HTTPException(
             status_code=500,
             detail="Não foi possível salvar o registro.",
+        )
+
+
+@app.get(
+    "/registros",
+    response_model=RegistroPaginadoResposta,
+)
+def consultar_registros(
+    identificador_unico: str | None = Query(default=None),
+    repositorio: str | None = Query(default=None),
+    usuario: str | None = Query(default=None),
+    sistema: str | None = Query(default=None),
+    data_inicio: datetime | None = Query(default=None),
+    data_fim: datetime | None = Query(default=None),
+    dia: date | None = Query(default=None),
+    mes: str | None = Query(
+        default=None,
+        pattern=r"^\d{4}-(0[1-9]|1[0-2])$",
+    ),
+    ano: int | None = Query(default=None, ge=1, le=9998),
+    campo_data: Literal["data_hora", "data_hora_online"] = "data_hora",
+    limite: int = Query(default=50, ge=1, le=100),
+    deslocamento: int = Query(default=0, ge=0),
+    chave_api: ChaveAPI = Depends(verificar_api_key),
+    db: Session = Depends(get_db),
+):
+    # 1. Validar os filtros de data.
+    if data_inicio is not None and data_inicio.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail="data_inicio deve incluir fuso horário.",
+        )
+
+    if data_fim is not None and data_fim.utcoffset() is None:
+        raise HTTPException(
+            status_code=422,
+            detail="data_fim deve incluir fuso horário.",
+        )
+
+    if (
+        data_inicio is not None
+        and data_fim is not None
+        and data_inicio > data_fim
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="data_inicio não pode ser posterior a data_fim.",
+        )
+
+    # 2. Impedir que uma chave comum consulte outro sistema.
+    if (
+        not chave_api.pode_consultar_todos
+        and sistema is not None
+        and sistema != chave_api.nome_sistema
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Sua chave não tem permissão para consultar este sistema.",
+        )
+
+    # 3. Construir a consulta base.
+    # O JOIN garante que só sejam considerados registros
+    # cuja chave de origem existe na tabela chaves_api.
+    consulta = (
+        select(RegistroAtividade)
+        .join(
+            ChaveAPI,
+            RegistroAtividade.chave_api_id == ChaveAPI.id,
+        )
+    )
+
+    filtros = []
+
+    # 4. Aplicar o escopo de acesso da chave autenticada.
+    if chave_api.pode_consultar_todos:
+        if sistema is not None:
+            filtros.append(ChaveAPI.nome_sistema == sistema)
+    else:
+        filtros.append(
+            ChaveAPI.nome_sistema == chave_api.nome_sistema
+        )
+
+    # 5. Aplicar os filtros textuais.
+    if identificador_unico is not None:
+        filtros.append(
+            RegistroAtividade.identificador_unico == identificador_unico
+        )
+
+    if repositorio is not None:
+        filtros.append(
+            RegistroAtividade.repositorio == repositorio
+        )
+
+    if usuario is not None:
+        filtros.append(
+            RegistroAtividade.usuario == usuario
+        )
+
+    # 6. Selecionar a coluna de data que será consultada.
+    coluna_data = getattr(RegistroAtividade, campo_data)
+
+    # 7. Aplicar o intervalo explícito.
+    if data_inicio is not None:
+        filtros.append(
+            coluna_data >= data_inicio.astimezone(timezone.utc)
+        )
+
+    if data_fim is not None:
+        filtros.append(
+            coluna_data <= data_fim.astimezone(timezone.utc)
+        )
+
+    # 8. Aplicar o filtro por dia UTC.
+    if dia is not None:
+        inicio_dia = datetime(
+            dia.year, dia.month, dia.day, tzinfo=timezone.utc
+        )
+        fim_dia = inicio_dia + timedelta(days=1)
+
+        filtros.append(coluna_data >= inicio_dia)
+        filtros.append(coluna_data < fim_dia)
+
+    # 9. Aplicar o filtro por mês UTC, no formato AAAA-MM.
+    if mes is not None:
+        ano_mes, mes_numero = map(int, mes.split("-"))
+
+        inicio_mes = datetime(
+            ano_mes, mes_numero, 1, tzinfo=timezone.utc
+        )
+
+        if mes_numero == 12:
+            inicio_proximo_mes = datetime(
+                ano_mes + 1, 1, 1, tzinfo=timezone.utc
+            )
+        else:
+            inicio_proximo_mes = datetime(
+                ano_mes, mes_numero + 1, 1, tzinfo=timezone.utc
+            )
+
+        filtros.append(coluna_data >= inicio_mes)
+        filtros.append(coluna_data < inicio_proximo_mes)
+
+    # 10. Aplicar o filtro por ano UTC.
+    if ano is not None:
+        inicio_ano = datetime(ano, 1, 1, tzinfo=timezone.utc)
+        inicio_proximo_ano = datetime(
+            ano + 1, 1, 1, tzinfo=timezone.utc
+        )
+
+        filtros.append(coluna_data >= inicio_ano)
+        filtros.append(coluna_data < inicio_proximo_ano)
+
+    # 11. Contar todos os resultados antes da paginação.
+    consulta_total = (
+        select(func.count(RegistroAtividade.id))
+        .select_from(RegistroAtividade)
+        .join(
+            ChaveAPI,
+            RegistroAtividade.chave_api_id == ChaveAPI.id,
+        )
+        .where(*filtros)
+    )
+
+    # 12. Ordenar e paginar no próprio banco de dados.
+    consulta_resultados = (
+        consulta
+        .where(*filtros)
+        .order_by(
+            coluna_data.desc(),
+            RegistroAtividade.id.desc(),
+        )
+        .limit(limite)
+        .offset(deslocamento)
+    )
+
+    try:
+        total = db.scalar(consulta_total) or 0
+        resultados = db.scalars(consulta_resultados).all()
+
+        return {
+            "total": total,
+            "limite": limite,
+            "deslocamento": deslocamento,
+            "resultados": resultados,
+        }
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível consultar os registros.",
         )

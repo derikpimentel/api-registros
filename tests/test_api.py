@@ -320,3 +320,301 @@ def test_admin_revoga_chave_e_bloqueia_seu_uso(client):
     )
 
     assert resposta_segunda_chave.status_code == 201
+
+
+def test_consultar_registros_exige_chave_api(client):
+    resposta = client.get("/registros")
+
+    assert resposta.status_code == 401
+
+
+def test_consultar_registros_restringe_acesso_ao_proprio_sistema(client):
+    # Cria um registro no Sistema A.
+    resposta_a = client.post(
+        "/registros",
+        json={
+            **DADOS_VALIDOS,
+            "identificador_unico": "DOC-SISTEMA-A",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+    assert resposta_a.status_code == 201
+
+    # Cria um registro no Sistema B.
+    resposta_b = client.post(
+        "/registros",
+        json={
+            **DADOS_VALIDOS,
+            "identificador_unico": "DOC-SISTEMA-B",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_2},
+    )
+    assert resposta_b.status_code == 201
+
+    # A chave A deve consultar somente os registros do Sistema A.
+    resposta = client.get(
+        "/registros",
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 200
+
+    dados = resposta.json()
+
+    assert dados["total"] == 1
+    assert len(dados["resultados"]) == 1
+    assert (
+        dados["resultados"][0]["identificador_unico"]
+        == "DOC-SISTEMA-A"
+    )
+
+
+def test_chave_comum_nao_pode_consultar_outro_sistema(client):
+    resposta = client.get(
+        "/registros",
+        params={"sistema": "Sistema de Teste B"},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 403
+
+
+def test_admin_concede_consulta_global(client):
+    # Localiza a chave do Sistema A.
+    resposta_lista = client.get(
+        "/admin/chaves",
+        headers={"X-Admin-Key": CHAVE_ADMIN_TESTE},
+    )
+    assert resposta_lista.status_code == 200
+
+    chaves = resposta_lista.json()
+    chave_a = next(
+        chave
+        for chave in chaves
+        if chave["nome_sistema"] == "Sistema de Teste A"
+    )
+
+    # Concede permissão global à chave A.
+    resposta_permissao = client.patch(
+        f"/admin/chaves/{chave_a['id']}/permissao-consulta-global",
+        headers={"X-Admin-Key": CHAVE_ADMIN_TESTE},
+        json={"pode_consultar_todos": True},
+    )
+
+    assert resposta_permissao.status_code == 200
+    assert resposta_permissao.json()["pode_consultar_todos"] is True
+
+    # Cria um registro no Sistema B.
+    resposta_registro = client.post(
+        "/registros",
+        json={
+            **DADOS_VALIDOS,
+            "identificador_unico": "DOC-GLOBAL-B",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_2},
+    )
+    assert resposta_registro.status_code == 201
+
+    # A chave A agora pode consultar especificamente o Sistema B.
+    resposta_consulta = client.get(
+        "/registros",
+        params={"sistema": "Sistema de Teste B"},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta_consulta.status_code == 200
+
+    dados = resposta_consulta.json()
+
+    assert dados["total"] == 1
+    assert (
+        dados["resultados"][0]["identificador_unico"]
+        == "DOC-GLOBAL-B"
+    )
+
+
+def test_consultar_registros_aplica_filtros_e_paginacao(client):
+    # Cria dois registros no Sistema A.
+    for identificador in ("DOC-FILTRO-001", "DOC-FILTRO-002"):
+        resposta = client.post(
+            "/registros",
+            json={
+                **DADOS_VALIDOS,
+                "identificador_unico": identificador,
+            },
+            headers={"X-API-Key": CHAVE_TESTE_1},
+        )
+        assert resposta.status_code == 201
+
+    # Consulta usando filtros combinados e uma página de um item.
+    resposta = client.get(
+        "/registros",
+        params={
+            "repositorio": "projeto-teste",
+            "usuario": "usuario_teste",
+            "dia": "2026-10-12",
+            "mes": "2026-10",
+            "ano": 2026,
+            "limite": 1,
+            "deslocamento": 0,
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 200
+
+    dados = resposta.json()
+
+    assert dados["total"] == 2
+    assert dados["limite"] == 1
+    assert dados["deslocamento"] == 0
+    assert len(dados["resultados"]) == 1
+    assert (
+        dados["resultados"][0]["identificador_unico"]
+        == "DOC-FILTRO-002"
+    )
+
+    # A segunda página deve retornar o outro registro.
+    resposta_segunda_pagina = client.get(
+        "/registros",
+        params={
+            "repositorio": "projeto-teste",
+            "usuario": "usuario_teste",
+            "dia": "2026-10-12",
+            "limite": 1,
+            "deslocamento": 1,
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta_segunda_pagina.status_code == 200
+
+    dados_segunda_pagina = resposta_segunda_pagina.json()
+
+    assert dados_segunda_pagina["total"] == 2
+    assert len(dados_segunda_pagina["resultados"]) == 1
+    assert (
+        dados_segunda_pagina["resultados"][0]["identificador_unico"]
+        == "DOC-FILTRO-001"
+    )
+
+
+def test_consultar_registros_rejeita_data_sem_fuso_horario(client):
+    resposta = client.get(
+        "/registros",
+        params={"data_inicio": "2026-10-12T02:00:00"},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 422
+
+
+def test_admin_revoga_permissao_global(client):
+    resposta_lista = client.get(
+        "/admin/chaves",
+        headers={"X-Admin-Key": CHAVE_ADMIN_TESTE},
+    )
+    assert resposta_lista.status_code == 200
+
+    chave_a = next(
+        chave
+        for chave in resposta_lista.json()
+        if chave["nome_sistema"] == "Sistema de Teste A"
+    )
+
+    # Concede a permissão global.
+    resposta = client.patch(
+        f"/admin/chaves/{chave_a['id']}/permissao-consulta-global",
+        headers={"X-Admin-Key": CHAVE_ADMIN_TESTE},
+        json={"pode_consultar_todos": True},
+    )
+    assert resposta.status_code == 200
+
+    # Revoga a permissão global.
+    resposta = client.patch(
+        f"/admin/chaves/{chave_a['id']}/permissao-consulta-global",
+        headers={"X-Admin-Key": CHAVE_ADMIN_TESTE},
+        json={"pode_consultar_todos": False},
+    )
+
+    assert resposta.status_code == 200
+    assert resposta.json()["pode_consultar_todos"] is False
+
+    # A chave A volta a não poder consultar o Sistema B.
+    resposta_consulta = client.get(
+        "/registros",
+        params={"sistema": "Sistema de Teste B"},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta_consulta.status_code == 403
+
+
+def test_consultar_registro_por_identificador(client):
+    criacao = client.post(
+        "/registros",
+        json={
+            **DADOS_VALIDOS,
+            "identificador_unico": "DOC-BUSCA-ESPECIFICA",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+    assert criacao.status_code == 201
+
+    resposta = client.get(
+        "/registros",
+        params={"identificador_unico": "DOC-BUSCA-ESPECIFICA"},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 200
+
+    dados = resposta.json()
+
+    assert dados["total"] == 1
+    assert (
+        dados["resultados"][0]["identificador_unico"]
+        == "DOC-BUSCA-ESPECIFICA"
+    )
+
+
+def test_consultar_registros_por_intervalo_de_data(client):
+    criacao = client.post(
+        "/registros",
+        json={
+            **DADOS_VALIDOS,
+            "identificador_unico": "DOC-INTERVALO",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+    assert criacao.status_code == 201
+
+    resposta = client.get(
+        "/registros",
+        params={
+            "data_inicio": "2026-10-12T04:59:00Z",
+            "data_fim": "2026-10-12T05:01:00Z",
+            "campo_data": "data_hora",
+        },
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 200
+
+    dados = resposta.json()
+
+    assert dados["total"] == 1
+    assert (
+        dados["resultados"][0]["identificador_unico"]
+        == "DOC-INTERVALO"
+    )
+
+
+def test_consultar_registros_rejeita_limite_acima_do_maximo(client):
+    resposta = client.get(
+        "/registros",
+        params={"limite": 101},
+        headers={"X-API-Key": CHAVE_TESTE_1},
+    )
+
+    assert resposta.status_code == 422

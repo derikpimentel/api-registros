@@ -63,6 +63,12 @@ class RegistroResposta(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RegistroPaginadoResposta(BaseModel):
+    total: int
+    limite: int
+    deslocamento: int
+    resultados: list[RegistroResposta]
+
 
 class ChaveAPICriar(BaseModel):
     nome_sistema: str = Field(
@@ -88,6 +94,7 @@ class ChaveAPIResposta(BaseModel):
     id: int
     nome_sistema: str
     ativa: bool
+    pode_consultar_todos: bool
     criada_em: datetime
     ultimo_uso_em: datetime | None
 
@@ -99,4 +106,9 @@ class ChaveAPICriada(BaseModel):
     nome_sistema: str
     chave_api: str
     ativa: bool
+    pode_consultar_todos: bool
     criada_em: datetime
+
+
+class PermissaoConsultaGlobal(BaseModel):
+    pode_consultar_todos: bool

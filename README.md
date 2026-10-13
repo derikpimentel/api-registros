@@ -25,6 +25,12 @@ API desenvolvida com **FastAPI e PostgreSQL** para receber, validar e armazenar 
 - Registro da data e hora do último uso de cada chave.
 - Migrações versionadas do banco com Alembic.
 - Testes automatizados com banco de testes separado.
+- Consulta de registros com filtros combináveis.
+- Filtros por identificador, repositório, usuário, sistema e período.
+- Paginação dos resultados com limite configurável.
+- Restrição de consultas ao sistema associado à chave autenticada.
+- Permissão administrativa para autorizar consultas entre sistemas.
+- Seleção entre `data_hora` e `data_hora_online` para filtros temporais.
 
 ## Requisitos
 
@@ -182,6 +188,8 @@ Se a chave administrativa não estiver configurada, as operações administrativ
 | `POST` | `/admin/chaves` | Criar uma chave para um sistema cliente. |
 | `GET` | `/admin/chaves` | Listar as chaves cadastradas e seus metadados. |
 | `PATCH` | `/admin/chaves/{chave_id}/revogar` | Revogar uma chave existente. |
+| `GET` | `/registros` | Consultar registros com filtros e paginação. |
+| `PATCH` | `/admin/chaves/{chave_id}/permissao-consulta-global` | Conceder ou revogar a permissão de consulta entre sistemas. |
 
 Os endpoints administrativos exigem `X-Admin-Key`. O endpoint de criação recebe um corpo semelhante a:
 
@@ -195,6 +203,90 @@ Na criação, a API retorna a nova chave em texto puro **uma única vez**. O ban
 
 A listagem retorna metadados, como o nome do sistema, o estado da chave, a data de criação e o último uso. A revogação desativa a credencial, impedindo que ela autorize novas requisições.
 
+## Consultar registros
+
+O endpoint `GET /registros` permite consultar registros de atividade usando a chave de cliente enviada no cabeçalho `X-API-Key`.
+
+### Parâmetros de consulta
+
+| Parâmetro | Descrição |
+|---|---|
+| `identificador_unico` | Filtra pelo identificador exato do registro. |
+| `repositorio` | Filtra pelo nome exato do repositório. |
+| `usuario` | Filtra pelo nome informado no registro. |
+| `sistema` | Filtra pelo nome do sistema de origem, conforme as permissões da chave. |
+| `data_inicio` | Limite inicial do intervalo de data e hora, inclusive. |
+| `data_fim` | Limite final do intervalo de data e hora, inclusive. |
+| `dia` | Filtra por um dia no calendário UTC, no formato `AAAA-MM-DD`. |
+| `mes` | Filtra por mês no calendário UTC, no formato `AAAA-MM`. |
+| `ano` | Filtra por ano no calendário UTC. |
+| `campo_data` | Escolhe `data_hora` ou `data_hora_online`. O padrão é `data_hora`. |
+| `limite` | Quantidade máxima de resultados por página. Padrão: 50; máximo: 100. |
+| `deslocamento` | Quantidade de resultados a ignorar antes de retornar a página. Padrão: 0. |
+
+Os filtros podem ser combinados. Os parâmetros `data_inicio` e `data_fim` devem incluir um fuso horário. Os filtros `dia`, `mes` e `ano` utilizam os limites do calendário UTC.
+
+### Exemplo de requisição
+
+```http
+GET /registros?usuario=usuario-exemplo&mes=2026-10&limite=50&deslocamento=0
+X-API-Key: SUA_CHAVE_DE_CLIENTE
+```
+
+### Exemplo de resposta
+
+```json
+{
+  "total": 1,
+  "limite": 50,
+  "deslocamento": 0,
+  "resultados": [
+    {
+      "id": 1,
+      "identificador_unico": "documento-123",
+      "repositorio": "repositorio-exemplo",
+      "data_hora": "2026-10-12T10:00:00-03:00",
+      "data_hora_online": "2026-10-12T13:00:02Z",
+      "usuario": "usuario-exemplo"
+    }
+  ]
+}
+```
+
+O campo `total` representa a quantidade de registros correspondentes aos filtros antes da paginação. A lista `resultados` contém apenas os itens da página solicitada.
+
+### Permissões de consulta
+
+Por padrão, cada chave pode consultar os registros associados ao seu próprio sistema, inclusive aqueles registrados por outras chaves do mesmo sistema.
+
+Uma chave com a permissão `pode_consultar_todos` habilitada pode consultar registros de outros sistemas. A permissão é administrada pelo endpoint:
+
+```http
+PATCH /admin/chaves/{chave_id}/permissao-consulta-global
+X-Admin-Key: SUA_CHAVE_ADMINISTRATIVA
+Content-Type: application/json
+```
+
+Para conceder a permissão:
+
+```json
+{
+  "pode_consultar_todos": true
+}
+```
+
+Para revogá-la:
+
+```json
+{
+  "pode_consultar_todos": false
+}
+```
+
+Uma chave sem permissão global que tente consultar explicitamente outro sistema recebe HTTP `403`. Registros sem chave de origem identificável não são incluídos nas consultas.
+
+Todas as operações administrativas exigem `X-Admin-Key`. Nunca distribua essa credencial aos sistemas clientes.
+
 ## Executar os testes
 
 Configure `TEST_DATABASE_URL` para apontar exclusivamente para o banco PostgreSQL de testes e execute:
@@ -203,7 +295,7 @@ Configure `TEST_DATABASE_URL` para apontar exclusivamente para o banco PostgreSQ
 python -m pytest -v
 ```
 
-Os testes preparam um banco isolado, criam dados de teste e verificam a autenticação, a gravação de registros, a identificação do sistema de origem e as operações administrativas.
+Os testes verificam a autenticação, a gravação e a consulta de registros, os filtros, a paginação, o isolamento entre sistemas, a concessão e a revogação da permissão de consulta global e as operações administrativas.
 
 **Atenção:** a preparação dos testes exclui e recria as tabelas do banco indicado por `TEST_DATABASE_URL`. Verifique essa URL antes de executar a suíte.
 
@@ -250,4 +342,6 @@ Após a implantação, teste `/health` e valide a autenticação e as operaçõe
 
 ## Estado do projeto
 
-A suíte local conta atualmente com testes para autenticação, registro de atividades, identificação de sistemas clientes, criação e listagem de chaves e revogação de credenciais. A implantação em produção deve ser validada separadamente após a configuração do banco e das variáveis de ambiente.
+A suíte local conta atualmente com testes para autenticação, registro e consulta de atividades, identificação de sistemas clientes, criação e listagem de chaves de API, revogação de credenciais, filtros de consulta, paginação dos resultados, isolamento de dados entre sistemas e concessão e revogação da permissão de consulta global.
+
+As migrações do banco de dados estão configuradas com Alembic e foram aplicadas com sucesso no ambiente local de desenvolvimento. A implantação em produção deve ser validada separadamente após a configuração do banco de dados e das variáveis de ambiente no Render.
